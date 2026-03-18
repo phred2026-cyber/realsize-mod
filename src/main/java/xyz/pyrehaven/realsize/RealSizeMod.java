@@ -8,10 +8,13 @@ import net.minecraft.entity.attribute.EntityAttributeInstance;
 import net.minecraft.entity.attribute.EntityAttributeModifier;
 import net.minecraft.entity.attribute.EntityAttributes;
 import net.minecraft.entity.attribute.EntityAttribute;
+import net.minecraft.registry.Registries;
 import net.minecraft.registry.entry.RegistryEntry;
 import net.minecraft.util.Identifier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import java.util.HashMap;
+import java.util.Map;
 
 /**
  * RealSize v1.0.5 — Accurate real-world scaling, all 1.21.11 mobs
@@ -78,19 +81,31 @@ public class RealSizeMod implements ModInitializer {
     private static final Identifier ID_FOLLOW_RANGE = Identifier.of(MOD_ID, "follow_range");
     private static final Identifier ID_STEP_HEIGHT  = Identifier.of(MOD_ID, "step_height");
 
-    // Visibility floor — anything below this in real scale gets clamped here.
-    // Spider (0.22) and bee (0.22) are the established minimum visible size.
     private static final double FLOOR = 0.22;
     private static final double CAP   = 1.45;
 
+    // Registry-ID based overrides for mobs added in 1.21.11 (not in 1.21.1 compile mappings)
+    private static final Map<String, Double> REGISTRY_SCALES = new HashMap<>();
+    static {
+        REGISTRY_SCALES.put("minecraft:nautilus",        0.40);
+        REGISTRY_SCALES.put("minecraft:zombie_nautilus", 0.40);
+    }
+
     @Override
     public void onInitialize() {
-        LOGGER.info("RealSize v1.0.5 loaded — accurate real-world scaling for all 1.21.11 mobs");
+        LOGGER.info("RealSize v1.0.6 loaded — compiled 1.21.1, runtime-compatible with 1.21.11 (nautilus support)");
 
         ServerEntityEvents.ENTITY_LOAD.register((entity, world) -> {
             if (!(entity instanceof LivingEntity living)) return;
 
-            double scale = getScale(entity.getType());
+            // Check registry-ID overrides first (for 1.21.11 mobs not in 1.21.1 mappings)
+            String entityId = Registries.ENTITY_TYPE.getId(entity.getType()).toString();
+            double scale;
+            if (REGISTRY_SCALES.containsKey(entityId)) {
+                scale = REGISTRY_SCALES.get(entityId);
+            } else {
+                scale = getScale(entity.getType());
+            }
             if (scale == 1.0) return;
 
             // Clamp to safe range
@@ -166,10 +181,11 @@ public class RealSizeMod implements ModInitializer {
         // Salmon: ~60cm. Vanilla ~0.50m. Ratio >1 but vanilla already reasonable. 0.70.
         if (type == EntityType.SALMON)           return 0.70;
 
-        // ── CEPHALOPODS ─────────────────────────────────────────────────────────
+        // ── CEPHALOPODS & MOLLUSCS ──────────────────────────────────────────────
         // Real squid: ~30cm mantle. Vanilla: ~0.80m. Ratio ~0.38.
         if (type == EntityType.SQUID)            return 0.40;
         if (type == EntityType.GLOW_SQUID)       return 0.40;
+        // Nautilus + Zombie Nautilus (1.21.11) handled via REGISTRY_SCALES map above
 
         // ── REPTILES ────────────────────────────────────────────────────────────
         // Real turtle: ~40cm shell. Vanilla is already quite small. Slight boost: 0.55.
