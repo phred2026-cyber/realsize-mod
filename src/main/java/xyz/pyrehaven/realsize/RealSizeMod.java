@@ -93,7 +93,7 @@ public class RealSizeMod implements ModInitializer {
 
     @Override
     public void onInitialize() {
-        LOGGER.info("RealSize v1.0.6 loaded — compiled 1.21.1, runtime-compatible with 1.21.11 (nautilus support)");
+        LOGGER.info("RealSize v1.0.7 loaded — spider/bee visibility + culling fixes");
 
         ServerEntityEvents.ENTITY_LOAD.register((entity, world) -> {
             if (!(entity instanceof LivingEntity living)) return;
@@ -115,8 +115,10 @@ public class RealSizeMod implements ModInitializer {
             applyModifier(living, EntityAttributes.GENERIC_SCALE, ID_SCALE,
                     scale - 1.0, EntityAttributeModifier.Operation.ADD_MULTIPLIED_BASE);
 
-            // Tiny mobs (< 0.40): aggressively boost follow range to fight engine culling
-            if (scale < 0.40) {
+            // Small mobs (< 0.50): boost follow range to compensate for engine
+            // render culling which scales with hitbox volume. A spider at 0.26x
+            // would otherwise vanish at ~5 blocks; this keeps them visible at ~16.
+            if (scale < 0.50) {
                 double rangeBoost = (1.0 / scale) - 1.0;
                 applyModifier(living, EntityAttributes.GENERIC_FOLLOW_RANGE, ID_FOLLOW_RANGE,
                         rangeBoost, EntityAttributeModifier.Operation.ADD_MULTIPLIED_BASE);
@@ -148,19 +150,23 @@ public class RealSizeMod implements ModInitializer {
     private double getScale(EntityType<?> type) {
 
         // ── ARTHROPODS ──────────────────────────────────────────────────────────
-        // Real spiders: 1-3cm. Vanilla spider: ~0.9m tall. True ratio ~0.03 → floor.
-        if (type == EntityType.SPIDER)           return 0.22; // floor — still readable
-        if (type == EntityType.CAVE_SPIDER)      return 0.22; // same floor
-        if (type == EntityType.SILVERFISH)       return 0.22; // floor
-        if (type == EntityType.ENDERMITE)        return 0.22; // floor
+        // Spider: bumped to 0.26 — roughly tarantula-sized, still tiny but
+        // the bigger hitbox reduces engine render-culling at normal distances.
+        // Cave spider is notably smaller than normal spider IRL (Tegenaria vs
+        // Dysdera) — keeping distinct separation between the two.
+        if (type == EntityType.SPIDER)           return 0.26;
+        if (type == EntityType.CAVE_SPIDER)      return 0.20; // smaller species, floor-ish
+        if (type == EntityType.SILVERFISH)       return 0.22;
+        if (type == EntityType.ENDERMITE)        return 0.22;
 
         // ── INSECTS ─────────────────────────────────────────────────────────────
-        // Real bee: ~1.5cm. Vanilla bee: ~0.6m. True ratio ~0.02 → floor.
-        if (type == EntityType.BEE)              return 0.22; // floor
+        // Bee: bumped to 0.25 — closer to a real bumblebee vs honeybee size,
+        // also helps render culling distance noticeably.
+        if (type == EntityType.BEE)              return 0.25;
 
         // ── BATS ────────────────────────────────────────────────────────────────
-        // Real bat body: ~6cm. Vanilla bat: ~0.9m. Floor.
-        if (type == EntityType.BAT)              return 0.22; // floor
+        // Bat: 0.24 — slightly bigger than floor, bats have a decent wingspan IRL.
+        if (type == EntityType.BAT)              return 0.24;
 
         // ── AMPHIBIANS ──────────────────────────────────────────────────────────
         // Real frog: ~8-10cm body. Vanilla frog: ~0.55m. Ratio ~0.18 → bump to 0.28.
