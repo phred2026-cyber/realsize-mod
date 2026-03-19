@@ -15,6 +15,9 @@
       "xyz.pyrehaven.realsize.RealSizeMod"
     ]
   },
+  "mixins": [
+    "realsize.mixins.json"
+  ],
   "depends": {
     "fabricloader": ">=0.14.21",
     "minecraft": "~1.21.1",
