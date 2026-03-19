@@ -1,0 +1,46 @@
+package xyz.pyrehaven.realsize.mixin;
+
+import net.minecraft.entity.Entity;
+import net.minecraft.entity.EntityType;
+import net.minecraft.server.world.ServerChunkLoadingManager;
+import org.spongepowered.asm.mixin.Final;
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Shadow;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+import xyz.pyrehaven.realsize.RealSizeMod;
+
+/**
+ * Hooks ServerChunkLoadingManager$EntityTracker.getMaxTrackDistance() to enforce
+ * a minimum tracking distance (in blocks) for small scaled mobs.
+ *
+ * This fires AFTER adjustTrackingDistance() already applied the server's view-distance
+ * multiplier, so it's the true last word on whether a player receives updates.
+ *
+ * MIN_TRACKING_DISTANCE_BLOCKS = 128 blocks (8 chunks).
+ * This overrides even low view-distance settings for affected mobs.
+ */
+@Mixin(targets = "net.minecraft.server.world.ServerChunkLoadingManager$EntityTracker")
+public class EntityTrackerMixin {
+
+    @Final
+    @Shadow
+    Entity entity;
+
+    @Inject(method = "getMaxTrackDistance()I", at = @At("RETURN"), cancellable = true)
+    private void realsize_enforceMinTrackDistance(CallbackInfoReturnable<Integer> cir) {
+        if (!(entity instanceof net.minecraft.entity.LivingEntity)) return;
+
+        String entityId = net.minecraft.registry.Registries.ENTITY_TYPE
+                .getId(entity.getType()).toString();
+
+        double scale = RealSizeMod.getScaleForId(entityId, entity.getType());
+        double clamped = Math.max(RealSizeMod.FLOOR, Math.min(RealSizeMod.CAP, scale));
+
+        if (clamped < RealSizeMod.TRACKING_RANGE_THRESHOLD) {
+            int enforced = Math.max(cir.getReturnValue(), RealSizeMod.MIN_TRACKING_DISTANCE_BLOCKS);
+            cir.setReturnValue(enforced);
+        }
+    }
+}

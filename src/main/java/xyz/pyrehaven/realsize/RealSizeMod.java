@@ -92,12 +92,19 @@ public class RealSizeMod implements ModInitializer {
     public static final double TRACKING_RANGE_THRESHOLD = 0.60;
 
     /**
-     * Minimum tracking range in CHUNKS forced for small mobs via the mixin.
-     * EntityType.getMaxTrackDistance() returns chunks, not blocks.
-     * Vanilla: monsters = 10 chunks, animals = 5-8, misc = 5.
-     * We use 8 chunks (128 blocks) — ensures small mobs stream normally.
+     * Minimum tracking range in CHUNKS for EntityType.getMaxTrackDistance() mixin.
+     * This feeds into EntityTracker constructor as maxDistance = chunks * 16.
+     * Vanilla: monsters = 10, animals = 5-8, misc = 5.
      */
-    public static final int MIN_TRACKING_RANGE_CHUNKS = 8;
+    public static final int MIN_TRACKING_RANGE_CHUNKS = 10;
+
+    /**
+     * Minimum tracking distance in BLOCKS enforced in EntityTracker.getMaxTrackDistance().
+     * This fires after adjustTrackingDistance() applies the view-distance multiplier,
+     * so it's the hard floor regardless of server view distance setting.
+     * 128 blocks = 8 chunks.
+     */
+    public static final int MIN_TRACKING_DISTANCE_BLOCKS = 128;
 
     // Registry-ID based overrides for mobs added in 1.21.11 (not in 1.21.1 compile mappings)
     private static final Map<String, Double> REGISTRY_SCALES = new HashMap<>();
@@ -108,7 +115,7 @@ public class RealSizeMod implements ModInitializer {
 
     @Override
     public void onInitialize() {
-        LOGGER.info("RealSize v1.0.9 loaded — getMaxTrackDistance mixin active, small mobs won't cull");
+        LOGGER.info("RealSize v1.1.0 loaded — EntityTracker floor mixin active, small mobs won't cull");
 
         ServerEntityEvents.ENTITY_LOAD.register((entity, world) -> {
             if (!(entity instanceof LivingEntity living)) return;
@@ -154,6 +161,17 @@ public class RealSizeMod implements ModInitializer {
      * Returns 1.0 for unmodified mobs.
      */
     public static double getScaleStatic(EntityType<?> type) {
+        return getScale(type);
+    }
+
+    /**
+     * Public static accessor used by {@link xyz.pyrehaven.realsize.mixin.EntityTrackerMixin}.
+     * Checks REGISTRY_SCALES first (for 1.21.11-only mobs), then falls back to getScale().
+     */
+    public static double getScaleForId(String entityId, EntityType<?> type) {
+        if (REGISTRY_SCALES.containsKey(entityId)) {
+            return REGISTRY_SCALES.get(entityId);
+        }
         return getScale(type);
     }
 
