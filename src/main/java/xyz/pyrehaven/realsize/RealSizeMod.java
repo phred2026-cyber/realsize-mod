@@ -10,9 +10,11 @@ import net.minecraft.entity.attribute.EntityAttributes;
 import net.minecraft.entity.attribute.EntityAttribute;
 import net.minecraft.registry.Registries;
 import net.minecraft.registry.entry.RegistryEntry;
+import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.Identifier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import java.lang.reflect.Field;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -84,6 +86,11 @@ public class RealSizeMod implements ModInitializer {
     private static final double FLOOR = 0.22;
     private static final double CAP   = 1.45;
 
+    // Minimum tracking range in blocks for any scaled entity.
+    // Vanilla spider tracks at ~8 blocks; at 0.26x that would be ~2 blocks.
+    // We force a minimum of 48 blocks for small mobs so they never cull nearby.
+    private static final int MIN_TRACKING_RANGE = 48;
+
     // Registry-ID based overrides for mobs added in 1.21.11 (not in 1.21.1 compile mappings)
     private static final Map<String, Double> REGISTRY_SCALES = new HashMap<>();
     static {
@@ -91,12 +98,23 @@ public class RealSizeMod implements ModInitializer {
         REGISTRY_SCALES.put("minecraft:zombie_nautilus", 0.40);
     }
 
+    // Cached reflection fields for tracker range hack
+    private static Field entityTrackersField = null;
+    private static Field maxDistanceField = null;
+    private static boolean reflectionReady = false;
+
     @Override
     public void onInitialize() {
-        LOGGER.info("RealSize v1.0.7 loaded — spider/bee visibility + culling fixes");
+        LOGGER.info("RealSize v1.0.8 loaded — tracker range hack enabled, small mobs never cull");
+
+        initReflection();
 
         ServerEntityEvents.ENTITY_LOAD.register((entity, world) -> {
             if (!(entity instanceof LivingEntity living)) return;
+            if (!(world instanceof ServerWorld serverWorld)) return;
+
+            // Lazy-init reflection from live world instance (can't use Class.forName with Yarn names)
+            if (!reflectionReady) initReflectionFromWorld(serverWorld);
 
             // Check registry-ID overrides first (for 1.21.11 mobs not in 1.21.1 mappings)
             String entityId = Registries.ENTITY_TYPE.getId(entity.getType()).toString();
@@ -109,27 +127,188 @@ public class RealSizeMod implements ModInitializer {
             if (scale == 1.0) return;
 
             // Clamp to safe range
-            scale = Math.max(FLOOR, Math.min(CAP, scale));
+            final double finalScale = Math.max(FLOOR, Math.min(CAP, scale));
 
             // Apply visual + hitbox scale
             applyModifier(living, EntityAttributes.GENERIC_SCALE, ID_SCALE,
-                    scale - 1.0, EntityAttributeModifier.Operation.ADD_MULTIPLIED_BASE);
+                    finalScale - 1.0, EntityAttributeModifier.Operation.ADD_MULTIPLIED_BASE);
 
-            // Small mobs (< 0.50): boost follow range to compensate for engine
-            // render culling which scales with hitbox volume. A spider at 0.26x
-            // would otherwise vanish at ~5 blocks; this keeps them visible at ~16.
-            if (scale < 0.50) {
-                double rangeBoost = (1.0 / scale) - 1.0;
-                applyModifier(living, EntityAttributes.GENERIC_FOLLOW_RANGE, ID_FOLLOW_RANGE,
-                        rangeBoost, EntityAttributeModifier.Operation.ADD_MULTIPLIED_BASE);
-            }
-
-            // Large mobs (> 1.10): step height boost so they can actually navigate terrain
-            if (scale > 1.10) {
+            // Large mobs: step height boost so they can navigate terrain
+            if (finalScale > 1.10) {
                 applyModifier(living, EntityAttributes.GENERIC_STEP_HEIGHT, ID_STEP_HEIGHT,
                         0.5, EntityAttributeModifier.Operation.ADD_VALUE);
             }
+
+            // For small mobs: forcibly set the entity tracker's maxDistance via
+            // reflection so the server never stops sending position updates to clients
+            // regardless of how small the hitbox is. This is the actual fix for
+            // culling — not follow range (which is AI), but the network tracker range.
+            if (finalScale < 0.60 && reflectionReady) {
+                // Schedule one tick later — tracker is created after entity load completes
+                serverWorld.getServer().execute(() -> {
+                    try {
+                        setTrackerRange(serverWorld, entity.getId(), MIN_TRACKING_RANGE);
+                    } catch (Exception e) {
+                        LOGGER.debug("Tracker range hack failed for {}: {}", entityId, e.getMessage());
+                    }
+                });
+            }
         });
+    }
+
+    /**
+     * Uses reflection to force the entity's tracker maxDistance to a minimum value
+     * so the server keeps streaming position/data to clients at normal viewing distances.
+     * entityTrackersField and maxDistanceField are resolved lazily via initReflectionFromWorld.
+     */
+    private void setTrackerRange(ServerWorld world, int entityId, int minRange) throws Exception {
+        // Walk: ServerChunkManager → loading manager (the object that owns entityTrackers)
+        Object chunkManager = world.getChunkManager();
+        Object loadingManager = null;
+        for (Field f : chunkManager.getClass().getDeclaredFields()) {
+            f.setAccessible(true);
+            Object val = f.get(chunkManager);
+            if (val != null && val.getClass() == entityTrackersField.getDeclaringClass()) {
+                loadingManager = val;
+                break;
+            }
+        }
+        if (loadingManager == null) return;
+
+        @SuppressWarnings("unchecked")
+        it.unimi.dsi.fastutil.ints.Int2ObjectMap<Object> trackers =
+                (it.unimi.dsi.fastutil.ints.Int2ObjectMap<Object>) entityTrackersField.get(loadingManager);
+
+        Object tracker = trackers.get(entityId);
+        if (tracker == null) return;
+
+        int currentMax = (int) maxDistanceField.get(tracker);
+        if (currentMax < minRange) {
+            maxDistanceField.set(tracker, minRange);
+            LOGGER.debug("Tracker range: entity {} {} → {}", entityId, currentMax, minRange);
+        }
+    }
+
+    private void initReflection() {
+        // Reflection is initialized lazily on first entity load (see initReflectionFromWorld)
+        // because we need a live ServerWorld instance to find the obfuscated class names.
+        reflectionReady = false;
+    }
+
+    /**
+     * Initialize reflection fields lazily from a live world instance.
+     * Fabric remaps class names so Class.forName() with Yarn names doesn't work at runtime.
+     * We instead walk the live object graph to find the actual runtime classes.
+     */
+    private void initReflectionFromWorld(ServerWorld world) {
+        try {
+            // ServerWorld.getChunkManager() returns ServerChunkManager
+            Object chunkManager = world.getChunkManager();
+
+            // Find the chunkLoadingManager field by type — it's a ServerChunkLoadingManager
+            // but the runtime name is obfuscated. Find it by scanning fields for an Int2ObjectMap
+            // that likely holds the entity trackers, OR find the loading manager first.
+            Object loadingManager = null;
+            for (Field f : chunkManager.getClass().getDeclaredFields()) {
+                f.setAccessible(true);
+                Object val = f.get(chunkManager);
+                if (val == null) continue;
+                // ServerChunkLoadingManager has an entityTrackers Int2ObjectMap field
+                // Check if this object has such a field
+                for (Field inner : val.getClass().getDeclaredFields()) {
+                    if (inner.getType().getName().contains("Int2ObjectMap")) {
+                        loadingManager = val;
+                        entityTrackersField = inner;
+                        entityTrackersField.setAccessible(true);
+                        break;
+                    }
+                }
+                if (loadingManager != null) break;
+            }
+
+            if (loadingManager == null || entityTrackersField == null) {
+                LOGGER.warn("RealSize: could not find entityTrackers field — culling fix disabled");
+                return;
+            }
+
+            // Now find the EntityTracker inner class and its maxDistance (int) field
+            // The tracker map contains EntityTracker instances — get one if available,
+            // otherwise scan inner classes of the loading manager class
+            for (Class<?> inner : loadingManager.getClass().getDeclaredClasses()) {
+                for (Field f : inner.getDeclaredFields()) {
+                    if (f.getType() == int.class && f.getName().length() <= 3) {
+                        // Obfuscated int field — check if there's also a Set field
+                        // (EntityTracker has listeners Set and maxDistance int)
+                        boolean hasSet = false;
+                        for (Field f2 : inner.getDeclaredFields()) {
+                            if (f2.getType().getName().contains("Set")) { hasSet = true; break; }
+                        }
+                        if (hasSet) {
+                            maxDistanceField = f;
+                            maxDistanceField.setAccessible(true);
+                            break;
+                        }
+                    }
+                }
+                if (maxDistanceField != null) break;
+            }
+
+            // If inner class scan failed, try getting a live tracker instance from the map
+            if (maxDistanceField == null) {
+                @SuppressWarnings("unchecked")
+                it.unimi.dsi.fastutil.ints.Int2ObjectMap<Object> trackers =
+                        (it.unimi.dsi.fastutil.ints.Int2ObjectMap<Object>) entityTrackersField.get(loadingManager);
+                if (!trackers.isEmpty()) {
+                    Object tracker = trackers.values().iterator().next();
+                    for (Field f : tracker.getClass().getDeclaredFields()) {
+                        if (f.getType() == int.class) {
+                            f.setAccessible(true);
+                            int val = (int) f.get(tracker);
+                            // maxDistance is typically between 16-160
+                            if (val >= 16 && val <= 160) {
+                                maxDistanceField = f;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            reflectionReady = entityTrackersField != null && maxDistanceField != null;
+            if (reflectionReady) {
+                LOGGER.info("RealSize: tracker range reflection initialized — small mobs will not cull");
+            } else {
+                LOGGER.warn("RealSize: tracker range reflection incomplete — maxDistance field not found");
+            }
+        } catch (Exception e) {
+            LOGGER.warn("RealSize: tracker range reflection failed: {}", e.getMessage());
+        }
+    }
+
+    private Field findField(Class<?> clazz, String mappedName, String typeHint) {
+        for (Field f : clazz.getDeclaredFields()) {
+            // Try mapped name first
+            if (f.getName().equals(mappedName)) return f;
+            // Fall back to type hint matching (for when running with intermediary/obf)
+            if (typeHint != null && f.getType().getName().contains(
+                    typeHint.contains(".") ? typeHint.substring(typeHint.lastIndexOf('.') + 1) : typeHint)) {
+                return f;
+            }
+        }
+        return null;
+    }
+
+    private Object getField(Class<?> clazz, String name, Object instance) {
+        try {
+            Field f = findField(clazz, name, null);
+            if (f == null && clazz.getSuperclass() != null)
+                f = findField(clazz.getSuperclass(), name, null);
+            if (f == null) return null;
+            f.setAccessible(true);
+            return f.get(instance);
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     private void applyModifier(LivingEntity living,
