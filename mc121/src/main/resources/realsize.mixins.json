@@ -5,7 +5,7 @@
   "compatibilityLevel": "JAVA_21",
   "mixins": [
     "EntityTypeTrackingMixin",
-    "EntityTrackerMixin"
+    "TrackedEntityDistanceMixin"
   ],
   "injectors": {
     "defaultRequire": 1

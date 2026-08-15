@@ -2,23 +2,17 @@
   "schemaVersion": 1,
   "id": "realsize",
   "version": "${version}",
-  "name": "RealSize",
-  "description": "Makes mobs feel closer to real-world sizes, with server-controlled config for tiny and oversized mobs.",
-  "authors": [
-    "PyreHaven"
-  ],
+  "name": "RealSize (Rebuild Groundwork)",
+  "description": "Non-deployable structural groundwork for the RealSize clean rebuild.",
+  "authors": ["PyreHaven"],
   "contact": {},
   "license": "MIT",
   "icon": "assets/realsize/icon.png",
   "environment": "*",
   "entrypoints": {
-    "main": [
-      "xyz.pyrehaven.realsize.RealSizeMod"
-    ]
+    "main": ["xyz.pyrehaven.realsize.RealSizeMod"]
   },
-  "mixins": [
-    "realsize.mixins.json"
-  ],
+  "mixins": ["realsize.mixins.json"],
   "depends": {
     "fabricloader": "${loader_dependency}",
     "minecraft": "${minecraft_dependency}",
